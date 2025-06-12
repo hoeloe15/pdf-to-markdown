@@ -39,6 +39,17 @@
                         </label>
                     </div>
                     <div class="file-info" id="fileInfo"></div>
+
+                    <div class="backend-selector">
+                        <label for="backend">AI Backend:</label>
+                        <select id="backend" name="backend">
+                            <option value="openai" selected>OpenAI (Direct PDF Processing)</option>
+                            <option value="azure">Azure OpenAI (Image-based Processing)</option>
+                        </select>
+                        <small class="backend-info" id="backendInfo">OpenAI processes PDFs directly for better
+                            accuracy</small>
+                    </div>
+
                     <button type="submit" id="convertBtn" disabled>Convert to Markdown</button>
                 </form>
             </div>
@@ -73,7 +84,7 @@
         </main>
 
         <footer>
-            <p>Powered by Azure OpenAI & FastAPI</p>
+            <p>Powered by OpenAI & Azure OpenAI & FastAPI</p>
         </footer>
     </div>
 

@@ -4,6 +4,8 @@ document.addEventListener('DOMContentLoaded', function () {
     const fileInputLabel = document.querySelector('.file-input-label');
     const fileInfo = document.getElementById('fileInfo');
     const convertBtn = document.getElementById('convertBtn');
+    const backendSelect = document.getElementById('backend');
+    const backendInfo = document.getElementById('backendInfo');
     const statusSection = document.getElementById('statusSection');
     const loadingIndicator = document.getElementById('loadingIndicator');
     const successMessage = document.getElementById('successMessage');
@@ -44,6 +46,17 @@ document.addEventListener('DOMContentLoaded', function () {
         }
     });
 
+    // Backend selection change handler
+    backendSelect.addEventListener('change', function (e) {
+        const backend = e.target.value;
+
+        if (backend === 'openai') {
+            backendInfo.textContent = 'OpenAI processes PDFs directly for better accuracy';
+        } else if (backend === 'azure') {
+            backendInfo.textContent = 'Azure OpenAI converts PDF pages to images first';
+        }
+    });
+
     // Form submit handler
     uploadForm.addEventListener('submit', async function (e) {
         e.preventDefault();
@@ -60,6 +73,7 @@ document.addEventListener('DOMContentLoaded', function () {
         try {
             const formData = new FormData();
             formData.append('file', file);
+            formData.append('backend', backendSelect.value);
 
             const response = await fetch('/api/convert', {
                 method: 'POST',
