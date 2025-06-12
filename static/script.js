@@ -68,7 +68,7 @@ document.addEventListener('DOMContentLoaded', function () {
         }
 
         // Show loading state
-        showLoading();
+        showLoading(file.size);
 
         try {
             const formData = new FormData();
@@ -83,7 +83,7 @@ document.addEventListener('DOMContentLoaded', function () {
             const result = await response.json();
 
             if (response.ok) {
-                showSuccess(result.download_url, result.filename);
+                showSuccess(result.download_url, result.filename, result.message, result.batched);
             } else {
                 showError(result.detail || 'Conversion failed. Please try again.');
             }
@@ -93,18 +93,34 @@ document.addEventListener('DOMContentLoaded', function () {
         }
     });
 
-    function showLoading() {
+    function showLoading(fileSize) {
         statusSection.style.display = 'block';
         loadingIndicator.style.display = 'block';
         successMessage.style.display = 'none';
         errorMessage.style.display = 'none';
+
+        // Update loading message based on file size
+        const loadingText = document.querySelector('#loadingIndicator p');
+        if (loadingText) {
+            const fileSizeMB = fileSize / (1024 * 1024);
+            if (fileSizeMB > 1 || fileSize > 10000) { // Rough estimate for larger files
+                loadingText.innerHTML = `
+                    <strong>🔄 Processing your PDF...</strong><br>
+                    <span style="color: #666; font-size: 0.9em;">
+                        Large file detected - using intelligent batching for optimal results
+                    </span>
+                `;
+            } else {
+                loadingText.innerHTML = '<strong>🔄 Converting PDF to Markdown...</strong>';
+            }
+        }
 
         // Disable form
         convertBtn.disabled = true;
         pdfFileInput.disabled = true;
     }
 
-    function showSuccess(downloadUrl, filename) {
+    function showSuccess(downloadUrl, filename, message, batched) {
         loadingIndicator.style.display = 'none';
         successMessage.style.display = 'block';
         errorMessage.style.display = 'none';
@@ -112,6 +128,29 @@ document.addEventListener('DOMContentLoaded', function () {
         downloadLink.href = downloadUrl;
         downloadLink.download = filename;
         downloadLink.textContent = `Download ${filename}`;
+
+        // Show processing details
+        const successText = document.querySelector('#successMessage p');
+        if (successText) {
+            if (batched) {
+                // Extract batch info for a cleaner display
+                const batchMatch = message.match(/processed in (\d+) batches due to size: ([^)]+)/);
+                if (batchMatch) {
+                    const [, numBatches, fileSize] = batchMatch;
+                    successText.innerHTML = `
+                        <strong>✅ Conversion completed successfully!</strong><br>
+                        <span style="color: #666; font-size: 0.9em;">
+                            📄 Large document processed in ${numBatches} parallel batches (${fileSize})<br>
+                            🚀 Optimized for speed and quality
+                        </span>
+                    `;
+                } else {
+                    successText.innerHTML = `<strong>✅ ${message}</strong>`;
+                }
+            } else {
+                successText.innerHTML = `<strong>✅ ${message}</strong>`;
+            }
+        }
     }
 
     function showError(message) {

@@ -144,32 +144,28 @@ def extract_markdown_from_response(response_text: str) -> str:
 def check_pdf_size_and_pages(pdf_file_path: str) -> tuple[int, int]:
     """Check PDF file size and page count to determine if batching is needed"""
     try:
-        from pdf2image import convert_from_path
-        
         # Get file size
         file_size = os.path.getsize(pdf_file_path)
         
-        # Get page count (quick check without converting)
+        # Get page count using only PyPDF2 (no image conversion!)
         try:
-            # Quick page count check
-            images = convert_from_path(pdf_file_path, dpi=72, first_page=1, last_page=1)
-            # Get total pages by checking with a library
             import PyPDF2
             with open(pdf_file_path, 'rb') as file:
                 reader = PyPDF2.PdfReader(file)
                 page_count = len(reader.pages)
-        except:
+        except Exception as pdf_error:
+            logger.warning(f"Could not read PDF with PyPDF2: {pdf_error}")
             # Fallback: estimate based on file size
             page_count = max(1, file_size // 50000)  # Rough estimate: 50KB per page
         
-        logger.info(f"PDF analysis: {file_size} bytes, estimated {page_count} pages")
+        logger.info(f"PDF analysis: {file_size} bytes, {page_count} pages")
         return file_size, page_count
         
     except Exception as e:
         logger.warning(f"Could not analyze PDF size/pages: {e}")
         return os.path.getsize(pdf_file_path), 1
 
-def convert_pdf_with_openai_batched(pdf_file_path: str, max_pages_per_batch: int = 10) -> str:
+async def convert_pdf_with_openai_batched(pdf_file_path: str, max_pages_per_batch: int = 10) -> str:
     """Convert PDF using OpenAI with intelligent batching for large documents"""
     try:
         file_size, total_pages = check_pdf_size_and_pages(pdf_file_path)
@@ -188,28 +184,23 @@ def convert_pdf_with_openai_batched(pdf_file_path: str, max_pages_per_batch: int
         logger.info(f"Large PDF detected ({file_size} bytes, {total_pages} pages) - using batched processing")
         
         # Import required libraries for PDF splitting
-        from pdf2image import convert_from_path
         import tempfile
-        from reportlab.pdfgen import canvas
-        from reportlab.lib.pagesizes import letter
         import PyPDF2
         
-        # Split PDF into batches
-        all_markdown_content = []
-        
+        # Split PDF into batches and process them in parallel
         with open(pdf_file_path, 'rb') as input_file:
             reader = PyPDF2.PdfReader(input_file)
             total_pages = len(reader.pages)
             
             # Calculate number of batches
             num_batches = (total_pages + MAX_PAGES_PER_BATCH - 1) // MAX_PAGES_PER_BATCH
-            logger.info(f"Splitting PDF into {num_batches} batches of ~{MAX_PAGES_PER_BATCH} pages each")
+            logger.info(f"Splitting PDF into {num_batches} batches of ~{MAX_PAGES_PER_BATCH} pages each for parallel processing")
             
+            # Create all batch files first
+            batch_files = []
             for batch_num in range(num_batches):
                 start_page = batch_num * MAX_PAGES_PER_BATCH
                 end_page = min((batch_num + 1) * MAX_PAGES_PER_BATCH, total_pages)
-                
-                logger.info(f"Processing batch {batch_num + 1}/{num_batches} (pages {start_page + 1}-{end_page})")
                 
                 # Create temporary PDF for this batch
                 with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as batch_pdf:
@@ -220,27 +211,63 @@ def convert_pdf_with_openai_batched(pdf_file_path: str, max_pages_per_batch: int
                         writer.add_page(reader.pages[page_num])
                     
                     writer.write(batch_pdf)
-                    batch_pdf_path = batch_pdf.name
+                    batch_files.append({
+                        'path': batch_pdf.name,
+                        'batch_num': batch_num + 1,
+                        'start_page': start_page + 1,
+                        'end_page': end_page,
+                        'page_range': f"pages {start_page + 1}-{end_page}"
+                    })
+            
+            logger.info(f"Created {len(batch_files)} batch files, starting parallel processing...")
+            
+            # Process all batches in parallel using asyncio
+            try:
+                # Create async tasks for all batches
+                tasks = []
+                for batch_info in batch_files:
+                    task = convert_pdf_with_openai_single_async(
+                        batch_info['path'], 
+                        batch_info['batch_num'], 
+                        batch_info['page_range']
+                    )
+                    tasks.append(task)
                 
-                try:
-                    # Process this batch
-                    batch_markdown = convert_pdf_with_openai_single(batch_pdf_path)
-                    
-                    # Add batch separator and content
-                    if batch_num > 0:
-                        all_markdown_content.append(f"\n\n---\n\n# Batch {batch_num + 1} (Pages {start_page + 1}-{end_page})\n\n")
-                    
-                    all_markdown_content.append(batch_markdown)
-                    logger.info(f"Successfully processed batch {batch_num + 1}")
-                    
-                except Exception as batch_error:
-                    logger.error(f"Failed to process batch {batch_num + 1}: {batch_error}")
-                    all_markdown_content.append(f"\n\n[Error processing pages {start_page + 1}-{end_page}: {batch_error}]\n\n")
+                # Wait for all tasks to complete
+                logger.info("Waiting for all batch conversions to complete...")
+                results = await asyncio.gather(*tasks, return_exceptions=True)
                 
-                finally:
-                    # Clean up temporary batch file
+                # Sort results by batch number and combine
+                batch_results = {}
+                for result in results:
+                    if isinstance(result, Exception):
+                        logger.error(f"Batch task failed with exception: {result}")
+                        continue
+                    batch_num, markdown_content = result
+                    batch_results[batch_num] = markdown_content
+                
+                # Combine results in order
+                all_markdown_content = []
+                for batch_num in range(1, num_batches + 1):
+                    if batch_num in batch_results:
+                        # Add batch separator (except for first batch)
+                        if batch_num > 1:
+                            batch_info = batch_files[batch_num - 1]
+                            all_markdown_content.append(f"\n\n---\n\n# Batch {batch_num} ({batch_info['page_range']})\n\n")
+                        
+                        all_markdown_content.append(batch_results[batch_num])
+                        logger.info(f"Successfully processed batch {batch_num}")
+                    else:
+                        batch_info = batch_files[batch_num - 1]
+                        error_msg = f"\n\n[Error: Batch {batch_num} ({batch_info['page_range']}) failed to process]\n\n"
+                        all_markdown_content.append(error_msg)
+                        logger.error(f"Missing result for batch {batch_num}")
+                
+            finally:
+                # Clean up all temporary batch files
+                for batch_info in batch_files:
                     try:
-                        os.unlink(batch_pdf_path)
+                        os.unlink(batch_info['path'])
                     except:
                         pass
         
@@ -353,9 +380,9 @@ async def convert_pdf_with_openai_single_async(pdf_file_path: str, batch_num: in
         # Return error message for this batch
         return batch_num, f"\n\n[Error processing batch {batch_num} ({page_range}): {str(e)}]\n\n"
 
-def convert_pdf_with_openai_direct(pdf_file_path: str) -> str:
+async def convert_pdf_with_openai_direct(pdf_file_path: str) -> str:
     """Convert PDF to markdown using OpenAI API with intelligent batching for large files"""
-    return convert_pdf_with_openai_batched(pdf_file_path)
+    return await convert_pdf_with_openai_batched(pdf_file_path)
 
 def convert_pdf_with_ai(pdf_file_path: str) -> str:
     """Convert PDF to markdown using Azure OpenAI GPT-4 Vision by converting pages to images"""
@@ -378,7 +405,7 @@ def convert_pdf_with_ai(pdf_file_path: str) -> str:
         
         # Get Azure OpenAI client
         client = get_azure_openai_client()
-        deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4")
+        deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o")
         
         all_markdown_content = []
         
@@ -501,7 +528,7 @@ async def convert_pdf(
         # Convert PDF to markdown using selected backend
         if backend == "openai":
             logger.info("Converting PDF to markdown using OpenAI direct API")
-            markdown_content = convert_pdf_with_openai_direct(temp_pdf_path)
+            markdown_content = await convert_pdf_with_openai_direct(temp_pdf_path)
         else:  # backend == "azure"
             logger.info("Converting PDF to markdown using Azure OpenAI (PDF→Images→AI)")
             markdown_content = convert_pdf_with_ai(temp_pdf_path)
@@ -586,7 +613,7 @@ async def convert_pdf_openai_direct(file: UploadFile = File(...)) -> Dict[str, A
         
         # Convert PDF directly using OpenAI
         logger.info("Converting PDF to markdown using OpenAI direct API")
-        markdown_content = convert_pdf_with_openai_direct(temp_pdf_path)
+        markdown_content = await convert_pdf_with_openai_direct(temp_pdf_path)
         
         if not markdown_content:
             logger.error("OpenAI returned empty content")
