@@ -57,7 +57,7 @@ def get_azure_openai_client():
     try:
         api_key = os.getenv("AZURE_OPENAI_API_KEY")
         endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-        api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2023-12-01-preview")
+        api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
         
         if not api_key:
             raise ValueError("AZURE_OPENAI_API_KEY environment variable is not set")
@@ -77,53 +77,96 @@ def get_azure_openai_client():
         raise HTTPException(status_code=500, detail=f"Failed to initialize Azure OpenAI client: {str(e)}")
 
 def convert_pdf_with_ai(pdf_file_path: str) -> str:
-    """Convert PDF to markdown using ONLY Azure OpenAI GPT-4 Vision"""
+    """Convert PDF to markdown using Azure OpenAI GPT-4 Vision by converting pages to images"""
     try:
         logger.info(f"Converting PDF to markdown using AI: {pdf_file_path}")
         
-        # Read PDF file as base64
-        with open(pdf_file_path, 'rb') as pdf_file:
-            pdf_content = pdf_file.read()
-            pdf_base64 = base64.b64encode(pdf_content).decode('utf-8')
+        # Import pdf2image for PDF to image conversion
+        from pdf2image import convert_from_path
+        from PIL import Image
+        import io
         
-        logger.info(f"PDF file size: {len(pdf_content)} bytes")
+        # Convert PDF pages to images
+        logger.info("Converting PDF pages to images")
+        try:
+            images = convert_from_path(pdf_file_path, dpi=200, fmt='JPEG')
+            logger.info(f"Successfully converted PDF to {len(images)} page images")
+        except Exception as e:
+            logger.error(f"Failed to convert PDF to images: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Failed to convert PDF to images: {str(e)}")
         
-        # Use Azure OpenAI to extract and convert PDF content
+        # Get Azure OpenAI client
         client = get_azure_openai_client()
         deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4")
         
-        logger.info("Sending PDF to Azure OpenAI for conversion")
+        all_markdown_content = []
         
-        response = client.chat.completions.create(
-            model=deployment_name,
-            messages=[
-                {
-                    "role": "system", 
-                    "content": "You are an expert at converting PDF documents to well-formatted Markdown. Extract all text content and convert it to clean, properly structured Markdown with appropriate headers, formatting, lists, links, and tables."
-                },
-                {
-                    "role": "user",
-                    "content": [
+        # Process each page image
+        for page_num, image in enumerate(images, 1):
+            logger.info(f"Processing page {page_num} of {len(images)}")
+            
+            # Convert image to base64
+            img_buffer = io.BytesIO()
+            image.save(img_buffer, format='JPEG', quality=95)
+            img_base64 = base64.b64encode(img_buffer.getvalue()).decode('utf-8')
+            
+            # Send image to Azure OpenAI
+            try:
+                response = client.chat.completions.create(
+                    model=deployment_name,
+                    messages=[
                         {
-                            "type": "text",
-                            "text": "Please convert this PDF document to well-formatted Markdown. Preserve all formatting including headers, bold/italic text, lists, tables, and links. Maintain the document structure and hierarchy."
+                            "role": "system", 
+                            "content": "You are an expert at converting document images to well-formatted Markdown. Extract all text content and convert it to clean, properly structured Markdown with appropriate headers, formatting, lists, links, and tables. Preserve the document structure and hierarchy."
                         },
                         {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:application/pdf;base64,{pdf_base64}"
-                            }
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": f"Please convert this document page (page {page_num}) to well-formatted Markdown. Preserve all formatting including headers, bold/italic text, lists, tables, and links. Extract all text content accurately."
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/jpeg;base64,{img_base64}"
+                                    }
+                                }
+                            ]
                         }
-                    ]
-                }
-            ],
-            max_tokens=4000,
-            temperature=0.1
-        )
+                    ],
+                    max_tokens=4000,
+                    temperature=0.1
+                )
+                
+                page_markdown = response.choices[0].message.content
+                if page_markdown:
+                    # Add page separator for multi-page documents
+                    if page_num > 1:
+                        all_markdown_content.append(f"\n\n---\n\n# Page {page_num}\n\n")
+                    all_markdown_content.append(page_markdown)
+                    logger.info(f"Successfully processed page {page_num}")
+                else:
+                    logger.warning(f"No content returned for page {page_num}")
+                    
+            except Exception as e:
+                logger.error(f"Failed to process page {page_num}: {str(e)}")
+                # Continue with other pages instead of failing completely
+                all_markdown_content.append(f"\n\n[Error processing page {page_num}: {str(e)}]\n\n")
         
-        logger.info("Successfully received markdown from Azure OpenAI")
-        return response.choices[0].message.content
+        # Combine all page content
+        combined_markdown = "".join(all_markdown_content)
         
+        if not combined_markdown.strip():
+            logger.error("No markdown content was generated from any page")
+            raise HTTPException(status_code=500, detail="Failed to extract any content from PDF")
+        
+        logger.info(f"Successfully converted PDF with {len(images)} pages to markdown")
+        return combined_markdown
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
     except Exception as e:
         logger.error(f"AI PDF conversion failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to convert PDF with AI: {str(e)}")
